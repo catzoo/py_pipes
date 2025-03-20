@@ -1,18 +1,29 @@
 import blessed
 import random
+import time
 
 # Minimal ticks until it can do a turn. Small number is smaller lines, larger is bigger lines.
 MIN_TICKS_UNTIL_TURN = 5
-# When the line turns and there is already a pipe there. This replaces it with a "+" symbol
-REPLACE_TURNS_WITH_PLUS = False
+# When there is already a pipe. This will replace it with a "+" if it's going across or is a turn.
+REPLACE_WITH_PLUS = False
+# This will add "+" with other pipes. Set to False to only add "+" with itself rather than other pipes.
+# Only works if REPLACE_WITH_PLUS is True
+# Warning. When this is set to True, it will clear the screen variable.
+# Meaning, PIPE_ADD_ONE won't properly keep track if there is already a pipe there or not.
+ADD_PLUS_WITH_OTHER_PIPES = True
+# Changes the "+" color. Value will be a RGB tuple "(255, 255, 255)" Set to None to use the Pipe's color.
+PLUS_COLOR = None  # (255, 255, 255)
 # Tick rate is in seconds
 TICK_RATE = 0.01
+# Blessed input adds more delay to the tick rate. Disable it to remove the delay.
+# But it will also disable the "r" and "q" keys
+DISABLE_INPUT = False
 # If the screen is over a percentage filled, it will clear the screen. Set to 0 to disable this.
-MAX_PERCENTAGE_FILLED = 0.25
-# When keeping track of pipes on the screen. This will add a pipe to a spot rather than set it to one.
-# Mainly used to check how much of the screen is filled. Set this to True to count for pipes laying on top of each other
-# Leave False to only set to one.
-PIPE_ADD_ONE = False
+MAX_PERCENTAGE_FILLED = 0.50
+# When keeping track of how many characters are on the screen. This will change it to always add by one.
+# Set False to not count the character if there is already a pipe.
+# Set True to always count the character.
+PIPE_ADD_ONE = True
 
 
 class Line:
@@ -48,6 +59,7 @@ class Pipes:
         self.last_turn = 0  # Ticks since last turn
         self.clearing = False  # Flag to clear the screen. Main difference is to wait a few seconds before clearing
         self.screen = None
+        self.characters = 0  # Number of characters on the screen
         self.generate_screen()
         self.random_color_pos()
 
@@ -58,14 +70,7 @@ class Pipes:
 
         :return: bool
         """
-        if MAX_PERCENTAGE_FILLED == 0:
-            return False
-
-        total = 0
-        for x in self.screen:
-            total += sum(x)
-
-        return total >= (self.size[0] * self.size[1]) * MAX_PERCENTAGE_FILLED
+        return self.characters >= (self.size[0] * self.size[1]) * MAX_PERCENTAGE_FILLED
 
     def generate_screen(self) -> None:
         """
@@ -76,7 +81,7 @@ class Pipes:
         for _ in range(self.size[1]):
             line = []
             for _ in range(self.size[0]):
-                line.append(0)
+                line.append(-1)
             self.screen.append(line)
 
     def random_color_pos(self) -> None:
@@ -113,7 +118,7 @@ class Pipes:
         self.pos = pos
         self.color = color
 
-    def draw(self, char: int, replace_plus=False) -> None:
+    def draw(self, char: int, turn=False) -> None:
         """
         Moves position forward depending on direction. Then print the character.
 
@@ -140,21 +145,40 @@ class Pipes:
 
         # Checking if position is outside of the screen
         if 0 <= self.pos[0] < self.size[0] and 0 <= self.pos[1] < self.size[1]:
-            if replace_plus and self.screen[self.pos[1]][self.pos[0]] != 0:
-                char = Line.plus
+            temp = self.screen[self.pos[1]][self.pos[0]]
+            color = self.color
+
+            if REPLACE_WITH_PLUS and temp != -1:
+                # Making sure the line is not going the same direction
+                difference = temp - self.direction
+                if turn or temp == 4 or not (difference == -2 or difference == 2 or difference == 0):
+                    char = Line.plus
+                    turn = True
+                    if PLUS_COLOR is not None:
+                        color = PLUS_COLOR
 
             if PIPE_ADD_ONE:
-                self.screen[self.pos[1]][self.pos[0]] += 1
-            else:
-                self.screen[self.pos[1]][self.pos[0]] = 1
+                self.characters += 1
+            elif temp == -1:
+                self.characters += 1
 
-            print(self.term.move_xy(*self.pos) + self.term.color_rgb(*self.color) + chr(char), end='', flush=True)
+            if turn:
+                # Marking the position as a turn
+                self.screen[self.pos[1]][self.pos[0]] = 4
+            else:
+                # Marking the position with the direction
+                self.screen[self.pos[1]][self.pos[0]] = self.direction
+
+            print(self.term.move_xy(*self.pos) + self.term.color_rgb(*color) + chr(char), end='', flush=True)
 
         else:
             if self.percentage_of_screen_filled():
                 self.clearing = True
             else:
                 self.random_color_pos()
+                if PIPE_ADD_ONE and ADD_PLUS_WITH_OTHER_PIPES is False:
+                    # Clear the screen to only keep track of one pipe.
+                    self.generate_screen()
 
     def resize(self) -> bool:
         """
@@ -187,7 +211,7 @@ class Pipes:
             new = 0
 
         char = LINE_TURN[(old, new)]
-        self.draw(char, REPLACE_TURNS_WITH_PLUS)
+        self.draw(char, True)
         self.direction = new
 
     def line(self) -> None:
@@ -207,6 +231,7 @@ class Pipes:
         self.generate_screen()
         self.random_color_pos()
         self.clearing = False
+        self.characters = 0
 
     def tick(self) -> None:
         """
@@ -218,6 +243,13 @@ class Pipes:
         else:
             self.line()
             self.last_turn += 1
+
+    def get_input(self, wait: float) -> str:
+        if DISABLE_INPUT:
+            time.sleep(wait)
+            return ""
+        else:
+            return self.term.inkey(timeout=wait)
 
     @classmethod
     def start(cls) -> None:
@@ -231,10 +263,10 @@ class Pipes:
             with self.term.cbreak(), self.term.fullscreen(), self.term.hidden_cursor():
                 while True:
                     if self.clearing:
-                        val = self.term.inkey(timeout=3)
+                        val = self.get_input(3)
                         self.clear()
                     else:
-                        val = self.term.inkey(timeout=TICK_RATE)
+                        val = self.get_input(TICK_RATE)
                     val = val.lower()
 
                     if val == "r":
